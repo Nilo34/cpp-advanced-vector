@@ -65,8 +65,10 @@ public:
     }
     RawMemory& operator=(RawMemory&& rhs) noexcept {
         if (this != &rhs) {
+            Deallocate(buffer_);
+            
             buffer_ = std::move(rhs.buffer_);
-            capacity_ = std::move(rhs.capacity_);
+            capacity_ = rhs.capacity_;
             
             rhs.buffer_ = nullptr;
             rhs.capacity_ = 0;
@@ -199,8 +201,8 @@ public:
     }
     Vector& operator=(Vector&& rhs) noexcept {
         if (this != &rhs) {
-            data_ = std::move(rhs.data_);
-            size_ = std::move(rhs.size_);
+            data_.Swap(rhs.data_);
+            size_ = rhs.size_;
             
             rhs.size_ = 0;
         }
@@ -220,12 +222,15 @@ public:
         size_ = new_size;
     }
     
-    template <typename T_FORWARD> //да подсмотрел идею в пачке, но зачем тогда ещё коментарии под задачками?
-    void PushBack(T_FORWARD&& value) {
-        EmplaceBack(std::forward<T_FORWARD>(value));
+    void PushBack(const T& value) {
+        EmplaceBack(value);
+    }
+    void PushBack(T&& value) {
+        EmplaceBack(std::forward<T>(value));
     }
     
     void PopBack() noexcept {
+        assert(size_ != 0);
         std::destroy_at(data_.GetAddress() + size_ - 1);
         --size_;
     }
@@ -237,12 +242,19 @@ public:
             RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
             
             new (new_data.GetAddress() + size_) T(std::forward<Args>(args)...);
-            // Конструируем элементы в new_data
-            if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
-                std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
-            } else {
-                std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
+            try {
+                // Конструируем элементы в new_data
+                if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
+                    std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
+                } else {
+                    std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
+                }
+            } catch(...) {
+                std::destroy_n(new_data.GetAddress(), size_);
+                
+                throw;
             }
+            
             // Разрушаем элементы в data_
             std::destroy_n(data_.GetAddress(), size_);
             // Избавляемся от старой сырой памяти, обменивая её на новую
@@ -278,26 +290,40 @@ public:
     
     template <typename... Args>
     iterator Emplace(const_iterator pos, Args&&... args) {
+        assert((begin() <= pos) && (pos <= end()));
+        
         int num_pos = pos - begin(); // ибо итератор при изменении вектора теряет актуальность
         
         if (size_ == Capacity()) {
             RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
             // вызываем конструктор нового элемента
             new (new_data.GetAddress() + num_pos) T(std::forward<Args>(args)...);
+            
             // Конструируем элементы в new_data
             if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
                 std::uninitialized_move_n(data_.GetAddress(), num_pos, new_data.GetAddress());
                 std::uninitialized_move_n(data_.GetAddress() + num_pos,
                                           size_ - num_pos,
                                           new_data.GetAddress() + num_pos + 1);
-                
+
             } else {
-                std::uninitialized_copy_n(data_.GetAddress(), num_pos, new_data.GetAddress());
-                std::uninitialized_copy_n(data_.GetAddress() + num_pos,
-                                          size_ - num_pos,
-                                          new_data.GetAddress() + num_pos + 1);
-                
-            }
+                    try {
+                        std::uninitialized_copy_n(data_.GetAddress(), num_pos, new_data.GetAddress());
+                    } catch(...) {
+                        std::destroy_at(new_data.GetAddress() + num_pos);
+                        throw;
+                    }
+                    try {
+                        std::uninitialized_copy_n(data_.GetAddress() + num_pos,
+                                                  size_ - num_pos,
+                                                  new_data.GetAddress() + num_pos + 1);
+                    } catch(...) {
+                        std::destroy_n(new_data.GetAddress(), num_pos);
+                        throw;
+                    }
+                }
+            
+            
             // Разрушаем элементы в data_
             std::destroy_n(data_.GetAddress(), size_);
             // Избавляемся от старой сырой памяти, обменивая её на новую
@@ -306,21 +332,21 @@ public:
             
         } else {
             
-            try {
-                if (pos == end()) {
+            if (pos == end()) {
                     new (end()) T(std::forward<Args>(args)...);
-                } else {
-                    T temporary_value(std::forward<Args>(args)...);
-                    
-                    new (end()) T(std::forward<T>(data_[0]));
-                    
+            } else {
+                T temporary_value(std::forward<Args>(args)...);
+                
+                new (end()) T(std::forward<T>(data_[0]));
+                
+                try {    
                     std::move_backward(begin() + num_pos, end() - 1, end());
-                    
-                    *(begin() + num_pos) = std::forward<T>(temporary_value);
+                } catch(...) {
+                    std::destroy_at(end());
+                    throw;
                 }
-            } catch(...) {
-                operator delete(end()); // скорее всего это не совсем корректно.
-                throw;
+                
+                *(begin() + num_pos) = std::forward<T>(temporary_value);
             }
             
         }
@@ -330,15 +356,16 @@ public:
     }
     
     iterator Erase(const_iterator pos) /*noexcept(std::is_nothrow_move_assignable_v<T>)*/ {
+        assert((begin() <= pos) && (pos <= end()));
+        
         auto num_pos = pos - begin(); // ибо итератор при изменении вектора теряет актуальность
         
         std::move(begin() + num_pos + 1, 
                   end(), 
                   begin() + num_pos);
         
-        std::destroy_at(end() - 1);
+        PopBack();
         
-        --size_;
         return begin() + num_pos;
     }
     
