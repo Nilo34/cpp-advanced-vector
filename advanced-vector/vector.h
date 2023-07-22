@@ -250,7 +250,7 @@ public:
                     std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
                 }
             } catch(...) {
-                std::destroy_n(new_data.GetAddress(), size_);
+                std::destroy_at(new_data.GetAddress() + size_);
                 
                 throw;
             }
@@ -290,7 +290,7 @@ public:
     
     template <typename... Args>
     iterator Emplace(const_iterator pos, Args&&... args) {
-        assert((begin() <= pos) && (pos <= end()));
+        assert((begin() <= pos) && (pos <= (data_.GetAddress() + size_)));
         
         int num_pos = pos - begin(); // ибо итератор при изменении вектора теряет актуальность
         
